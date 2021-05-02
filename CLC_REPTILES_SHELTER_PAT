@@ -1,0 +1,66 @@
+packages 	<- c('sf','tmap','ggplot2','dplyr')
+lapply(packages, require, character.only = TRUE)
+setwd("C:/zanfei")
+
+clc <- st_read('clc_2018.gpkg')
+pat <- st_read('pat.gpkg') %>% st_transform(crs=st_crs(clc))
+classes <- as.numeric(unique(clc$code_18))
+# CLC solo sul Trentino
+clc_pat <- clc[pat,]
+
+
+# genero un po' di punti a caso entro il Trentino: qua metti i tuoi "punti onduline" | ATTENZIONE, DEVONO AVERE UN CAMPO "id"
+points <- st_as_sf(st_sample(pat,size=10)) %>% mutate(id=row_number()) %>% dplyr::rename(geometry=x)
+points_buffers <- points %>% st_buffer(1000) # 1km buffer  
+# creo le colonne della tabella degli attributi utili ad immagazzinare la percentuale di categoria di land cover entro il buffer
+for(cl in classes) {
+	points_buffers[,paste0("clc_class_",cl,"_percentage")] <- NA
+}
+
+# estraggo le percentuali in parallelo usando lapply | SE SEI SICURO CHE I BUFFER NON SI SOVRAPPONGONO, IN REALTÃ SI POTREBBE FARE MOLTO PIÃ SEMPLICEMENTE...
+clc_buffers <-lapply(points_buffers %>% pull(id),function(x) {
+	# scelgo il buffer
+	buf <- points_buffers %>% dplyr::filter(id==x)
+	# prendo l'area
+	buffer_area <- buf %>% st_area() 
+	# interceco il buffer con il CLC, raggruppo le classi che il buffer contiene, ne calcolo la percentuale entro il buffer 
+	clc_buffer <- st_intersection(clc_pat,buf) %>% group_by(code_18) %>% summarise(perc_area=sum(drop_units(st_area(geom)))/buffer_area)
+	# pulisco in modo da ottenere UNA RIGA di un data.frame
+	clc_buffer <- clc_buffer %>% st_drop_geometry()
+	clc_buffer$perc_area <- clc_buffer$perc_area %>% drop_units()
+	clc_buffer <- as.data.frame(t(clc_buffer))
+	colnames(clc_buffer) <- paste0("buffer_clc_12_class_",clc_buffer[1,],"_percentage")
+	#clc_buffer<-as.numeric(clc_buffer[-1,])
+	clc_buffer$id <- x
+	clc_buffer <- clc_buffer[-1,] 
+	return(clc_buffer)
+})
+
+# clc_buffers Ã¨ una lista: la unisco in un dataframe 
+clc_buffers <- bind_rows(clc_buffers)
+rownames(clc_buffers) <- NULL
+
+# unisco tutto
+points_buffers <- points_buffers %>% dplyr::left_join(clc_buffers)
+
+# salvo, sia gpkg che csv 
+st_write(points_buffers,'statistiche_clc_onduline.gpkg')
+points_buffers_nogeom <- points_buffers %>% st_drop_geometry()
+write.csv2(points_buffers_nogeom,'statistiche_clc_onduline.csv',row.names=FALSE)
+
+# faccio un plot riassuntivo!
+clc_selected <- clc_pat[points_buffers,]
+clc_selected <- clc_selected %>% st_intersection(points_buffers)
+clc_selected$macroclass <- substr(clc_selected$code_18,1,1) # classe di land cover macro (primo numero del codice di tre cifre)
+clc_selected$medclass <- substr(clc_selected$code_18,1,2) # classe di land cover intermedia (primi due numeri del codice di tre cifre)
+
+#sites <- unique(clc_selected$site)
+g <- tm_shape(clc_selected) + 
+	tm_polygons("code_18", palette = "Set1") + # usando la classe di land cover fine
+    tm_layout(legend.position = c("left", "top")) +
+    tm_facets("id.1", free.scales = TRUE) + 
+    tm_shape(points_buffers %>% st_centroid()) + 
+	tm_dots("id",legend.show = FALSE,palette="Greys",size=1)
+g
+tmap_save(g,filename=paste0(getwd(),'/CLC_POINTS.png'),width=10,height = 10)
+
